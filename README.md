@@ -61,6 +61,10 @@ pair failed only where both fail (login walls, Reddit, Zhihu, m.medium.com).
 
 - `/deepseek` — key source, calls, session spend, cache hits, how many pages curl handled vs escalated
 - `/deepseek balance` — live account balance (free endpoint)
+- `/deepseek doctor` — one line per check, each with a fix when it fails: key source, balance,
+  `api.deepseek.com` reachability, `curl` version, and whether the four hosts curl is needed
+  for (Wikipedia, Stack Overflow, Hacker News, `raw.githubusercontent.com`) still answer from
+  here. Every probe runs in parallel with a 6 s cap, so the command finishes in about a second.
 - `/deepseek clear` — drop both caches
 
 ## Pricing

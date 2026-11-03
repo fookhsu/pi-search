@@ -275,6 +275,34 @@ test("/deepseek status reports spend and cache state", { skip: !HAS_KEY }, async
   assert.match(messages.join("\n"), /spend: \$/);
 });
 
+test("/deepseek doctor prints one line per check inside the time budget", { skip: !HAS_KEY }, async () => {
+  const { commands } = host();
+  const messages: string[] = [];
+  const ctx = {
+    modelRegistry: { getApiKeyForProvider: async () => process.env.DEEPSEEK_API_KEY },
+    ui: { notify: (message: string) => messages.push(message) },
+  };
+  const started = Date.now();
+  await commands.get("deepseek").handler("doctor", ctx as any);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 15_000, `doctor took ${elapsed} ms`);
+
+  const report = messages[messages.length - 1] ?? "";
+  for (const name of [
+    "key",
+    "balance",
+    "deepseek",
+    "curl",
+    "wikipedia",
+    "stackoverflow",
+    "news.ycombinator.com",
+    "raw.githubusercontent",
+  ]) {
+    assert.match(report, new RegExp(`^${name.replace(/\./g, "\\.")}\\s+(ok|fail)\\s+\\S`, "m"), `${name} missing from:\n${report}`);
+  }
+  assert.match(report, /^key\s+ok/m);
+});
+
 test("renderers produce text for TUI without touching the network", { skip: !HAS_KEY }, async () => {
   const { tools, run } = host();
   const theme = new Proxy({} as Record<string, unknown>, {

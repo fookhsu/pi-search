@@ -63,7 +63,7 @@ caching, and `web_read` wraps every chunk in the untrusted markers. Checked agai
 ordinary pages (0 removals) and the Wikipedia/OWASP injection articles (2 and 5, which the
 note reports).
 
-### [ ] P0-3 `/deepseek doctor`
+### [x] P0-3 `/deepseek doctor`
 
 One command that probes: key source, balance, DeepSeek reachability, `curl` presence, and
 whether the known-blocked hosts (Wikipedia, Stack Overflow, HN, `raw.githubusercontent.com`)
@@ -72,6 +72,10 @@ probing.
 
 **Done when** `/deepseek doctor` prints one line per check with ok/fail and a one-line fix,
 and the command never hangs longer than ~15 s total.
+
+Done: eight checks (key, balance, api.deepseek.com, curl, four known-blocked hosts), each
+capped at 7 s and all started together, ~1 s in practice. A live test asserts one aligned
+`ok`/`fail` line per check and the 15 s ceiling.
 
 ## P1 — the free second opinion
 

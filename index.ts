@@ -582,6 +582,165 @@ function preview(text: string, expanded: boolean, theme: Theme, hint: () => stri
 
 // ---------------------------------------------------------------- extension
 
+
+// ---------------------------------------------------------------- /deepseek doctor
+
+interface Check {
+  name: string;
+  ok: boolean;
+  detail: string;
+  fix?: string;
+}
+
+/** Hosts that curl reads and DeepSeek's crawler refuses; if they answer, local reading works. */
+const LOCAL_PROBES: Array<{ name: string; url: string }> = [
+  { name: "wikipedia", url: "https://en.wikipedia.org/wiki/Main_Page" },
+  { name: "stackoverflow", url: "https://stackoverflow.com/questions" },
+  { name: "news.ycombinator.com", url: "https://news.ycombinator.com/" },
+  { name: "raw.githubusercontent", url: "https://raw.githubusercontent.com/nodejs/node/main/README.md" },
+];
+
+const DOCTOR_BUDGET_MS = 7_000;
+
+function failed(exec: { stdout?: string; stderr?: string; code?: number }): string {
+  return (exec.stderr || "").trim().split("\n")[0].slice(0, 140) || `curl exited ${exec.code ?? "?"}`;
+}
+
+async function probeWithCurl(pi: ExtensionAPI, name: string, url: string): Promise<Check> {
+  try {
+    const exec = await pi.exec(
+      "curl",
+      ["-sS", "-o", "/dev/null", "--compressed", "--max-time", "6", "-A", UA, "-w", "%{http_code}", url],
+      { timeout: DOCTOR_BUDGET_MS },
+    );
+    const status = Number.parseInt((exec.stdout ?? "").trim(), 10) || 0;
+    if (status >= 200 && status < 400) return { name, ok: true, detail: `HTTP ${status}` };
+    if (status)
+      return {
+        name,
+        ok: false,
+        detail: `HTTP ${status}`,
+        fix: "This host blocks curl from here; web_read will fall back to DeepSeek's fetcher (billed).",
+      };
+    return { name, ok: false, detail: failed(exec), fix: "Check the network path or VPN, then rerun /deepseek doctor." };
+  } catch (error) {
+    return {
+      name,
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "The probe itself failed; is curl installed and are you online?",
+    };
+  }
+}
+
+async function probeDeepSeekApi(): Promise<Check> {
+  try {
+    // An unauthenticated request is enough: any HTTP answer proves the host is reachable.
+    const response = await fetch("https://api.deepseek.com/v1/tools/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "ping" }),
+      signal: AbortSignal.timeout(DOCTOR_BUDGET_MS),
+    });
+    await response.body?.cancel();
+    return {
+      name: "deepseek",
+      ok: true,
+      detail: `api.deepseek.com answered HTTP ${response.status}${response.status === 401 ? " (unauthenticated probe, as expected)" : ""}`,
+    };
+  } catch (error) {
+    return {
+      name: "deepseek",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "api.deepseek.com is unreachable; check DNS, proxy settings and the network path.",
+    };
+  }
+}
+
+async function probeCurlVersion(pi: ExtensionAPI): Promise<Check> {
+  try {
+    const exec = await pi.exec("curl", ["--version"], { timeout: 3_000 });
+    const first = (exec.stdout ?? "").split("\n")[0].trim();
+    if (exec.code === 0 && first) return { name: "curl", ok: true, detail: first.slice(0, 80) };
+    return { name: "curl", ok: false, detail: failed(exec), fix: "Install curl (`brew install curl`) — web_read's free path needs it." };
+  } catch (error) {
+    return {
+      name: "curl",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "Install curl (`brew install curl`) — web_read's free path needs it.",
+    };
+  }
+}
+
+async function probeKeyAndBalance(ctx: ExtensionContext): Promise<Check[]> {
+  let key: KeyInfo | null = null;
+  try {
+    key = await resolveKey(ctx, false);
+  } catch (error) {
+    key = null;
+  }
+  const keyCheck: Check = key
+    ? { name: "key", ok: true, detail: key.source }
+    : {
+        name: "key",
+        ok: false,
+        detail: "no DeepSeek API key found",
+        fix: "Run /login in Pi and pick DeepSeek, or export DEEPSEEK_API_KEY.",
+      };
+  if (!key) return [keyCheck, { name: "balance", ok: false, detail: "not checked (no key)", fix: "Fix the key first." }];
+
+  try {
+    const balance = await getBalance(key.key, { signal: AbortSignal.timeout(DOCTOR_BUDGET_MS) });
+    if (!balance.available)
+      return [
+        keyCheck,
+        {
+          name: "balance",
+          ok: false,
+          detail: `${balance.total ?? "0"} ${balance.currency ?? ""} available — account cannot pay for calls`.trim(),
+          fix: "Top up the DeepSeek account, or use only curl (engine=\"curl\").",
+        },
+      ];
+    return [
+      keyCheck,
+      { name: "balance", ok: true, detail: `${balance.total ?? "?"} ${balance.currency ?? ""} available`.trim() },
+    ];
+  } catch (error) {
+    return [
+      keyCheck,
+      {
+        name: "balance",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+        fix: "The balance endpoint failed; search may still work, so retry once before topping up.",
+      },
+    ];
+  }
+}
+
+function formatChecks(checks: Check[]): string {
+  const width = Math.max(...checks.map((check) => check.name.length));
+  return checks
+    .map((check) => {
+      const line = `${check.name.padEnd(width)}  ${check.ok ? "ok  " : "fail"}  ${check.detail}`;
+      return check.ok || !check.fix ? line : `${line}\n${" ".repeat(width + 8)}fix: ${check.fix}`;
+    })
+    .join("\n");
+}
+
+/** Every check runs at once, each capped at ~7 s, so the command cannot hang. */
+async function runDoctor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
+  const [keyChecks, deepseek, curl] = await Promise.all([
+    probeKeyAndBalance(ctx),
+    probeDeepSeekApi(),
+    probeCurlVersion(pi),
+  ]);
+  const hosts = await Promise.all(LOCAL_PROBES.map((probe) => probeWithCurl(pi, probe.name, probe.url)));
+  return formatChecks([...keyChecks, deepseek, curl, ...hosts]);
+}
+
 export default function deepseekSearchExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "web_search",
@@ -849,9 +1008,14 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("deepseek", {
-    description: "DeepSeek search status, balance, or cache reset: /deepseek [status|balance|clear]",
+    description: "DeepSeek search status, balance, cache reset, or an environment probe: /deepseek [status|balance|clear|doctor]",
     handler: async (args, ctx) => {
       const action = (args || "status").trim().toLowerCase();
+      if (action === "doctor") {
+        ctx.ui.notify("Probing key, balance, api.deepseek.com, curl and known-blocked hosts…", "info");
+        ctx.ui.notify(await runDoctor(pi, ctx), "info");
+        return;
+      }
       if (action === "clear") {
         searchCache.clear();
         fetchCache.clear();
@@ -872,7 +1036,7 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
         return;
       }
       if (action !== "status") {
-        ctx.ui.notify("Usage: /deepseek [status|balance|clear]", "warning");
+        ctx.ui.notify("Usage: /deepseek [status|balance|clear|doctor]", "warning");
         return;
       }
       ctx.ui.notify(
