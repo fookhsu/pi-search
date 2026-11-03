@@ -6,6 +6,8 @@ Zero runtime dependencies; the extension is loaded by Pi from `index.ts`.
 ## Start here
 
 1. Read [ROADMAP.md](ROADMAP.md). Work on the highest-priority unchecked item.
+   ROADMAP.md is the only list of items — this file deliberately does not mirror it, so do
+   not guess an ID from the examples below; open the roadmap.
 2. Read the item's **Done when** before writing code. If what you built does not satisfy it,
    the item is not done.
 3. Do not start a P1+ item while a P0 item is open unless the user says otherwise.
