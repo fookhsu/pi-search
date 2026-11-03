@@ -86,7 +86,16 @@ function stripChrome(html: string): string {
     .replace(/<!--[\s\S]*?-->/g, " ")
     // data-* attributes can carry whole JSON documents (Wikipedia does exactly that).
     .replace(/\sdata-[\w:.-]+=(?:"[^"]*"|'[^']*')/gi, "")
-    .replace(/<(script|style|noscript|template|svg|canvas|iframe|form)\b[\s\S]*?<\/\1>/gi, " ");
+    .replace(/<(script|style|noscript|template|svg|canvas|iframe|form)\b[\s\S]*?<\/\1>/gi, " ")
+    // Text a human never sees but an extractor happily reads is an injection carrier.
+    .replace(
+      /<([a-z][\w:-]*)\b[^>]*\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|text-indent\s*:\s*-\d{3,}px)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi,
+      " ",
+    )
+    .replace(
+      /<([a-z][\w:-]*)\b[^>]*\s(?:hidden(?=[\s/>])|aria-hidden\s*=\s*["']true["'])[^>]*>[\s\S]*?<\/\1>/gi,
+      " ",
+    );
 
   // Pick the densest semantic container, then clean furniture out of whatever we picked.
   const candidates = [
@@ -197,6 +206,51 @@ export function sliceContent(content: string, offset = 0, maxChars = 20000): Sli
 export function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}\n…[truncated ${text.length - maxChars} chars]`;
+}
+
+/**
+ * Phrases that mark a paragraph as written for the agent rather than for a reader.
+ * Heuristic on purpose: no model call, no cleverness, and a wrong guess only costs one
+ * paragraph. Long blocks are exempt so an article *about* prompt injection survives.
+ */
+const INJECTION_PATTERNS: RegExp[] = [
+  /\b(?:ignore|disregard|forget|override|bypass)\b[^.\n]{0,40}\b(?:previous|prior|above|earlier|preceding|system|all)\b[^.\n]{0,20}\b(?:instructions?|prompts?|rules?|directions?|guidelines?|context)\b/i,
+  /\bnew (?:system )?(?:instructions?|rules?)\s*:/i,
+  /\b(?:you are|you're) now\b[^.\n]{0,60}\b(?:a|an|the|my|in|acting|unrestricted)\b/i,
+  /\byou (?:must|will|should) now\b[^.\n]{0,40}\b(?:respond|answer|reply|output|print|ignore|act|say)\b/i,
+  /^(?:system|assistant|developer)\s*:\s*\S/im,
+  /<\|(?:im_start|im_end|system|endoftext)\|>|\[(?:INST|\/INST|SYSTEM|SYS)\]/i,
+  /\b(?:reveal|print|repeat|show|output)\b[^.\n]{0,30}\b(?:your|the)\b[^.\n]{0,20}\b(?:system prompt|initial instructions|hidden instructions|instructions above)\b/i,
+  /\bif you are an? (?:ai|llm|language model|assistant|agent|chatbot)\b/i,
+  /\bas an? (?:ai|llm|language model|assistant|chatbot)\b[^.\n]{0,40}\b(?:you|your)\b/i,
+  /\b(?:do not|never) (?:tell|inform|mention|reveal|alert)\b[^.\n]{0,30}\b(?:the )?(?:user|human)\.?\s*$/im,
+  /\b(?:send|post|upload|exfiltrate|forward)\b[^.\n]{0,40}\b(?:conversation|chat history|api key|api keys|credentials|secrets|system prompt)\b/i,
+  /^\s*(?:note|important|attention|instruction)s? to (?:the )?(?:ai|llm|assistant|agent|model)\b/i,
+];
+
+/** A block long enough to be an article rather than an aside is never dropped. */
+const INJECTION_MAX_BLOCK = 1_500;
+
+export interface InjectionScan {
+  text: string;
+  /** Paragraphs dropped because they read like instructions aimed at the agent. */
+  removed: number;
+}
+
+/** Drop paragraphs that address the agent instead of the reader. */
+export function stripInjected(text: string): InjectionScan {
+  if (!text) return { text, removed: 0 };
+  let removed = 0;
+  const kept = text.split(/\n\s*\n/).filter((block) => {
+    if (block.length > INJECTION_MAX_BLOCK) return true;
+    // A bare heading is a table-of-contents entry, not an instruction; "### System prompt"
+    // is what a security article looks like, not what an attack looks like.
+    if (/^#{1,6}\s/.test(block.trim()) && !block.includes("\n")) return true;
+    if (!INJECTION_PATTERNS.some((pattern) => pattern.test(block))) return true;
+    removed++;
+    return false;
+  });
+  return { text: kept.join("\n\n"), removed };
 }
 
 export function isoDate(value: string | null | undefined): string | null {

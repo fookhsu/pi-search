@@ -47,7 +47,7 @@ each hop is checked, and curl is pinned with `--resolve` to the address that was
 `guard.test.ts` (offline) plus two tool tests in `tools.test.ts`: one proves a local HTTP
 server receives zero connections, one proves a redirect into `127.0.0.1` is not followed.
 
-### [ ] P0-2 Mark page text untrusted, strip obvious injections
+### [x] P0-2 Mark page text untrusted, strip obvious injections
 
 Borrow the idea from `pi-safe-search`: wrap fetched content in an explicit untrusted-source
 block, and drop paragraphs that read like instructions aimed at the agent ("ignore previous
@@ -56,6 +56,12 @@ call.
 
 **Done when** a fixture page with a classic injection paragraph comes back without that
 paragraph, with a note saying one was removed, and the marker survives paging.
+
+Done: `stripInjected` (13 patterns, blocks >1 500 chars exempt so articles about injection
+survive) plus hidden-element removal in `htmlToMarkdown`; text is filtered once, before
+caching, and `web_read` wraps every chunk in the untrusted markers. Checked against six
+ordinary pages (0 removals) and the Wikipedia/OWASP injection articles (2 and 5, which the
+note reports).
 
 ### [ ] P0-3 `/deepseek doctor`
 
