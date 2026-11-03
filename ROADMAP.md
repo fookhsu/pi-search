@@ -30,7 +30,7 @@ dependency-free and fast — which is why safety and diagnostics come before new
 
 ## P0 — safety, cheap
 
-### [ ] P0-1 SSRF guard on `web_read`
+### [x] P0-1 SSRF guard on `web_read`
 
 `web_read` fetches whatever URL it is given, including `http://127.0.0.1:8080` and cloud
 metadata addresses. Resolve the host and refuse loopback, link-local, private ranges and
@@ -40,6 +40,12 @@ document why it cannot.
 **Done when** `web_read` on `http://127.0.0.1/`, `http://169.254.169.254/` and
 `http://10.0.0.1/` returns an error without a request leaving the process, and a unit test
 covers it without touching the network.
+
+Done: `guard.ts` classifies every address (IPv4, IPv6, v4-mapped, NAT64, 6to4) and refuses
+single-label and `.internal`-style names; `curl -L` became a hand-rolled redirect loop so
+each hop is checked, and curl is pinned with `--resolve` to the address that was checked.
+`guard.test.ts` (offline) plus two tool tests in `tools.test.ts`: one proves a local HTTP
+server receives zero connections, one proves a redirect into `127.0.0.1` is not followed.
 
 ### [ ] P0-2 Mark page text untrusted, strip obvious injections
 

@@ -22,6 +22,7 @@ import {
   type SearchResult,
 } from "./api.ts";
 import { TtlCache, cacheKey } from "./cache.ts";
+import { BlockedUrlError, type FetchTarget, resolveArgument, resolveFetchTarget } from "./guard.ts";
 import {
   cleanResultUrl,
   decodeEntities,
@@ -168,6 +169,8 @@ interface CurlPage {
   raw: string;
   pdf: boolean;
   error?: string;
+  /** Set when the guard refused a redirect; the caller must not fall back to another engine. */
+  blocked?: boolean;
 }
 
 function htmlTitle(html: string): string {
@@ -177,74 +180,167 @@ function htmlTitle(html: string): string {
   return heading ? decodeEntities(heading[1].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim() : "";
 }
 
-async function curlPage(
+const MAX_REDIRECTS = 4;
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+interface CurlExchange {
+  ok: boolean;
+  status: number;
+  contentType: string;
+  redirectUrl: string;
+  body: string;
+  error?: string;
+}
+
+/** One curl request against an address the guard already approved and pinned. */
+async function curlExchange(
   pi: ExtensionAPI,
-  url: string,
+  target: FetchTarget,
   signal?: AbortSignal,
   timeoutSec = 20,
-): Promise<CurlPage> {
+): Promise<CurlExchange> {
   const marker = "\n__PI_HTTP_META__";
-  const empty: CurlPage = {
+  const failed = (error: string): CurlExchange => ({
     ok: false,
     status: 0,
     contentType: "",
-    finalUrl: url,
-    title: "",
-    markdown: "",
-    raw: "",
-    pdf: false,
-  };
+    redirectUrl: "",
+    body: "",
+    error,
+  });
   let stdout: string;
   try {
+    // No -L: redirects are followed here so every hop passes the guard first.
     const exec = await pi.exec(
       "curl",
       [
-        "-sSL",
+        "-sS",
         "--compressed",
         "--max-time",
         String(timeoutSec),
+        // Pin the host to the address we vetted, so a second DNS answer cannot rebind it.
+        // A literal-IP URL has nothing to pin (and curl rejects a bracketed literal here).
+        ...(target.address === target.hostname ? [] : ["--resolve", resolveArgument(target)]),
         "-A",
         UA,
         "-H",
         "Accept: text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.5",
         "-w",
-        `${marker}%{http_code}|%{content_type}|%{url_effective}`,
-        url,
+        `${marker}%{http_code}|%{content_type}|%{redirect_url}`,
+        target.url,
       ],
       { signal, timeout: (timeoutSec + 5) * 1000, maxBuffer: 24 * 1024 * 1024 },
     );
     stdout = exec.stdout ?? "";
     if (exec.code !== 0 && !stdout) {
-      return { ...empty, error: (exec.stderr || "").trim().slice(0, 300) || `curl exited ${exec.code}` };
+      return failed((exec.stderr || "").trim().slice(0, 300) || `curl exited ${exec.code}`);
     }
   } catch (error) {
-    return { ...empty, error: error instanceof Error ? error.message : String(error) };
+    return failed(error instanceof Error ? error.message : String(error));
   }
 
   const cut = stdout.lastIndexOf(marker);
   const body = cut >= 0 ? stdout.slice(0, cut) : stdout;
   const meta = cut >= 0 ? stdout.slice(cut + marker.length).trim() : "";
-  const [statusText, contentType = "", finalUrl = url] = meta.split("|");
-  const status = Number.parseInt(statusText ?? "0", 10) || 0;
-
-  if (status < 200 || status >= 300) {
-    return { ...empty, status, contentType, finalUrl, error: `HTTP ${status}` };
-  }
-  if (isPdf(body)) {
-    return { ok: true, status, contentType, finalUrl, title: "", markdown: "", raw: "", pdf: true };
-  }
-  const isHtml = /html/i.test(contentType) || /^\s*<(!doctype|html)/i.test(body);
-  const markdown = isHtml ? htmlToMarkdown(body, { baseUrl: finalUrl }) : body.trim();
+  const [statusText, contentType = "", redirectUrl = ""] = meta.split("|");
   return {
     ok: true,
-    status,
+    status: Number.parseInt(statusText ?? "0", 10) || 0,
     contentType,
-    finalUrl,
-    title: isHtml ? htmlTitle(body) : "",
-    markdown,
-    raw: body,
-    pdf: false,
+    redirectUrl: redirectUrl.trim(),
+    body,
   };
+}
+
+async function curlPage(
+  pi: ExtensionAPI,
+  target: FetchTarget,
+  signal?: AbortSignal,
+  timeoutSec = 20,
+): Promise<CurlPage> {
+  const empty = (finalUrl: string): CurlPage => ({
+    ok: false,
+    status: 0,
+    contentType: "",
+    finalUrl,
+    title: "",
+    markdown: "",
+    raw: "",
+    pdf: false,
+  });
+
+  let current: FetchTarget = target;
+  for (let hop = 0; ; hop++) {
+    const exchange = await curlExchange(pi, current, signal, timeoutSec);
+    if (!exchange.ok) return { ...empty(current.url), error: exchange.error };
+
+    const { status, contentType, redirectUrl, body } = exchange;
+    if (REDIRECT_STATUS.has(status)) {
+      if (!redirectUrl)
+        return { ...empty(current.url), status, contentType, error: `HTTP ${status} redirect without a Location` };
+      if (hop >= MAX_REDIRECTS)
+        return { ...empty(current.url), status, contentType, error: `more than ${MAX_REDIRECTS} redirects` };
+      const next = new URL(redirectUrl, current.url).toString();
+      try {
+        current = await resolveFetchTarget(next);
+      } catch (error) {
+        if (!(error instanceof BlockedUrlError)) throw error;
+        return {
+          ...empty(current.url),
+          status,
+          contentType,
+          // An unresolvable redirect target is an ordinary failure; a refused one is policy.
+          error:
+            error.refusal === "policy"
+              ? `refused redirect to ${next}: ${error.message}. Redirects into private or reserved addresses are not followed.`
+              : `redirect to ${next} failed: ${error.message}.`,
+          blocked: error.refusal === "policy",
+        };
+      }
+      continue;
+    }
+
+    if (status < 200 || status >= 300) {
+      return { ...empty(current.url), status, contentType, error: `HTTP ${status}` };
+    }
+    if (isPdf(body)) {
+      return { ok: true, status, contentType, finalUrl: current.url, title: "", markdown: "", raw: "", pdf: true };
+    }
+    const isHtml = /html/i.test(contentType) || /^\s*<(!doctype|html)/i.test(body);
+    const markdown = isHtml ? htmlToMarkdown(body, { baseUrl: current.url }) : body.trim();
+    return {
+      ok: true,
+      status,
+      contentType,
+      finalUrl: current.url,
+      title: isHtml ? htmlTitle(body) : "",
+      markdown,
+      raw: body,
+      pdf: false,
+    };
+  }
+}
+
+/**
+ * Refuse non-public targets before any request leaves the process. Every redirect hop is
+ * checked in curlPage as well; this is the entry-point half of the same decision.
+ *
+ * A host that only fails to resolve is not a policy problem: with engine="deepseek" the
+ * fetch happens on DeepSeek's side, so their resolver is the one that matters.
+ */
+async function assertFetchable(url: string, tolerateNoDns: boolean): Promise<FetchTarget | null> {
+  try {
+    return await resolveFetchTarget(url);
+  } catch (error) {
+    if (!(error instanceof BlockedUrlError)) throw error;
+    if (error.refusal === "unresolvable" && tolerateNoDns) return null;
+    throw new DeepSeekError(
+      error.refusal === "policy"
+        ? `Refusing to read ${url}: ${error.message}. web_read only fetches public HTTP(S) pages; run curl yourself if this one is intentional.`
+        : `Cannot read ${url}: ${error.message}. Check the host name and the network path.`,
+      { kind: error.refusal === "policy" ? "invalid" : "network" },
+    );
+  }
 }
 
 interface ReadOutcome {
@@ -269,9 +365,11 @@ async function readPage(
 ): Promise<ReadOutcome> {
   const notes: string[] = [];
   let curl: CurlPage | null = null;
+  const target = await assertFetchable(url, engine === "deepseek");
 
   if (engine !== "deepseek") {
-    curl = await curlPage(pi, url, signal);
+    curl = await curlPage(pi, target!, signal);
+    if (curl.blocked) throw new DeepSeekError(curl.error ?? "redirect refused", { kind: "invalid" });
     if (curl.pdf) {
       return {
         title: url.split("/").pop() || url,
@@ -599,12 +697,13 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
     name: "web_read",
     label: "Web Read",
     description:
-      "Read one web page as Markdown. Tries local curl first (free, exact, reaches Wikipedia, Stack Overflow, Hacker News, raw.githubusercontent and other sites DeepSeek's crawler skips), then falls back to DeepSeek's Fetch API for pages that block curl. Returns a character range so long pages can be paged instead of flooding the context.",
+      "Read one web page as Markdown. Tries local curl first (free, exact, reaches Wikipedia, Stack Overflow, Hacker News, raw.githubusercontent and other sites DeepSeek's crawler skips), then falls back to DeepSeek's Fetch API for pages that block curl. Returns a character range so long pages can be paged instead of flooding the context. Only public HTTP(S) pages: loopback, private, link-local and cloud-metadata addresses are refused, including via redirects.",
     promptSnippet:
       "web_read: read one URL as Markdown (curl first, DeepSeek fetch as fallback); supports offset/max_chars paging.",
     promptGuidelines: [
       "Use web_read when a page's actual text matters: specs, changelogs, issue threads, API docs.",
       "If web_read reports that a page could not be read, do not retry the same URL; pick another source from web_search.",
+      "A web_read refusal for a private, loopback or metadata address is deliberate; do not work around it by other means unless the user explicitly asked for that host.",
       "Use web_read with offset to continue a page that was truncated instead of re-reading it from the top.",
     ],
     parameters: readParams,

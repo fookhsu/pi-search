@@ -53,11 +53,11 @@ function fakeExec(
   );
 }
 
-function host() {
+function host(exec: typeof fakeExec = fakeExec) {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const pi = {
-    exec: fakeExec,
+    exec,
     registerTool: (definition: any) => tools.set(definition.name, definition),
     registerCommand: (name: string, definition: any) => commands.set(name, definition),
   };
@@ -163,6 +163,55 @@ test("engine=deepseek skips curl and explains the failure", { skip: !HAS_KEY }, 
   });
   assert.equal(result.isError, true);
   assert.match(text(result), /curl -sSL/);
+});
+
+test("web_read refuses loopback, link-local and private targets before any request", async () => {
+  const { createServer } = await import("node:http");
+  let hits = 0;
+  const server = createServer((_request, response) => {
+    hits++;
+    response.end("this should never be reached");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const { run } = host();
+  try {
+    for (const url of [
+      `http://127.0.0.1:${port}/`,
+      "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+      "http://10.0.0.1/",
+      "http://localhost/",
+    ]) {
+      for (const engine of ["auto", "curl", "deepseek"] as const) {
+        const result = await run("web_read", { url, engine, max_chars: 500 });
+        assert.equal(result.isError, true, `${url} (${engine}) was not refused`);
+        assert.match(text(result), /Refusing to read/);
+      }
+    }
+    assert.equal(hits, 0, "a request left the process");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("web_read refuses a redirect into the local network without following it", async () => {
+  const calls: string[][] = [];
+  const stub = ((_cmd: string, args: string[]) => {
+    calls.push(args);
+    return Promise.resolve({
+      stdout: `moved\n__PI_HTTP_META__302|text/html|http://127.0.0.1:9/private`,
+      stderr: "",
+      code: 0,
+      killed: false,
+      truncated: false,
+    });
+  }) as unknown as typeof fakeExec;
+  const { run } = host(stub);
+  // A public literal address, so the guard approves the first hop without touching DNS.
+  const result = await run("web_read", { url: "http://93.184.216.34/", max_chars: 500 });
+  assert.equal(result.isError, true);
+  assert.match(text(result), /refused redirect/);
+  assert.equal(calls.length, 1, "the redirect target was fetched anyway");
 });
 
 test("web_read reports an unreadable host once, without inventing content", { skip: !HAS_KEY }, async () => {

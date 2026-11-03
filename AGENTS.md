@@ -24,6 +24,7 @@ fastest way to ruin it is to bolt on a second abstraction layer nobody asked for
 | `index.ts` | Tool definitions, rendering, the curl-first read strategy, `/deepseek` command |
 | `api.ts` | DeepSeek transport: validation, retry, rate limiting, error classification |
 | `extract.ts` | HTML→Markdown conversion, URL cleanup, paging, PDF detection |
+| `guard.ts` | URL safety: which addresses may be fetched, and the curl pin that keeps it true |
 | `cache.ts` | TTL+LRU cache used by both tools |
 | `*.test.ts` | Unit tests; `tools.test.ts` runs the real tools against the real APIs |
 

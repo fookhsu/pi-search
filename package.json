@@ -12,14 +12,15 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --test --experimental-strip-types api.test.ts extract.test.ts",
+    "test": "node --test --experimental-strip-types api.test.ts extract.test.ts guard.test.ts",
     "test:live": "node --test --experimental-strip-types tools.test.ts"
   },
   "files": [
     "index.ts",
     "api.ts",
     "cache.ts",
-    "extract.ts"
+    "extract.ts",
+    "guard.ts"
   ],
   "pi": {
     "extensions": [
