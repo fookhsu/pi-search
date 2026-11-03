@@ -72,5 +72,8 @@ npm run test:live # live tests against the real APIs (needs DEEPSEEK_API_KEY)
 pi -e ./index.ts  # load without installing
 ```
 
+Planned work lives in [ROADMAP.md](ROADMAP.md) (P0–P3, each with a definition of done);
+repo conventions for contributors and agents are in [AGENTS.md](AGENTS.md).
+
 `node_modules` is a symlink to Pi's own dependency tree so `typebox` and `@earendil-works/pi-tui`
 resolve outside the Pi process; it is git-ignored.
