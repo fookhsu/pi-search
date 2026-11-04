@@ -5,6 +5,11 @@
  * DNS answer leads to. So every hop is checked here, and curl is pinned with `--resolve`
  * to the address that was checked; a second DNS answer cannot rebind it afterwards.
  *
+ * The pin needs a direct connection. When http_proxy/https_proxy/all_proxy is set, curl
+ * hands the host name to the proxy and the proxy resolves it, so the pin is inert — the
+ * URL and redirect checks still hold, but the address guarantee does not. `/deepseek doctor`
+ * reports which mode is in force.
+ *
  * Nothing in this file touches the network except the resolver, which is injectable so
  * the decisions can be tested offline.
  */
@@ -132,17 +137,20 @@ function embeddedIpv4(words: number[], at: number): string {
 function isPublicIpv6(address: string): boolean {
   const words = ipv6Words(address);
   if (!words) return false;
-  const [w0, w1, w2, w3] = words;
+  const [w0, w1, w2, w3, w4, w5] = words;
 
-  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && words.every((word) => word === 0)) return false; // ::
-  if (words.slice(0, 7).every((word) => word === 0)) return false; // ::1 and the rest of ::/64
-
-  // Addresses that carry an IPv4 address inside: judge the IPv4 part.
-  const isMapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
-  const isNat64 = w0 === 0x64 && w1 === 0xff9b && w2 === 0 && w3 === 0 && words[4] === 0 && words[5] === 0;
-  const is6to4 = w0 === 0x2002;
-  if (isMapped || isNat64) return isPublicIpv4(embeddedIpv4(words, 6));
-  if (is6to4) return isPublicIpv4(embeddedIpv4(words, 1));
+  // Everything that carries an IPv4 address inside is judged by that IPv4 address — the
+  // whole point of these forms is to smuggle one in. That covers ::/96 (deprecated
+  // IPv4-compatible, and :: / ::1), ::ffff:0:0/96 (mapped), ::ffff:0:0:0/96 (translated),
+  // 64:ff9b::/96 and 64:ff9b:1::/48 (NAT64) and 2002::/16 (6to4).
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0)
+    return isPublicIpv4(embeddedIpv4(words, 6));
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0xffff)
+    return isPublicIpv4(embeddedIpv4(words, 6));
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0xffff && w5 === 0)
+    return isPublicIpv4(embeddedIpv4(words, 6));
+  if (w0 === 0x64 && w1 === 0xff9b) return isPublicIpv4(embeddedIpv4(words, 6));
+  if (w0 === 0x2002) return isPublicIpv4(embeddedIpv4(words, 1));
 
   if ((w0 & 0xffc0) === 0xfe80) return false; // link-local
   if ((w0 & 0xffc0) === 0xfec0) return false; // deprecated site-local
@@ -237,16 +245,25 @@ export async function resolveFetchTarget(
   if (!records.length)
     throw new BlockedUrlError(`${hostname} did not resolve`, { host: hostname, refusal: "unresolvable" });
 
-  // Refuse the whole host if any of its addresses is internal: a mixed answer is either a
+  // 0.0.0.0 and :: are what DNS blocklists (and some resolvers, asked for AAAA) answer with;
+  // they cannot be a destination, so they are dropped unless they are all there is.
+  const usable = records.filter((record) => record.address !== "0.0.0.0" && record.address !== "::");
+  if (!usable.length)
+    throw new BlockedUrlError(`${hostname} has no routable address (the answer was 0.0.0.0 or ::)`, {
+      host: hostname,
+      refusal: "unresolvable",
+    });
+
+  // Refuse the whole host if any remaining address is internal: a mixed answer is either a
   // misconfiguration or an attack, and picking the "good" record would be a race.
-  const blocked = records.find((record) => !isPublicAddress(record.address));
+  const blocked = usable.find((record) => !isPublicAddress(record.address));
   if (blocked)
     throw new BlockedUrlError(
       `${hostname} resolves to ${blocked.address}, which is a loopback, private, link-local or reserved address`,
       { host: hostname },
     );
 
-  return { url: url.toString(), hostname, port, address: records[0].address };
+  return { url: url.toString(), hostname, port, address: usable[0].address };
 }
 
 /** The `curl --resolve` argument that pins `host` to the address that was checked. */

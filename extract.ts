@@ -81,6 +81,25 @@ const JUNK_CLASS =
 
 const TAG = /<[a-zA-Z/!][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>/g;
 
+/** Inline styles that make text invisible to a reader without removing it from the DOM. */
+const HIDDEN_STYLE =
+  "(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|font-size\\s*:\\s*0(?:px)?\\b" +
+  "|opacity\\s*:\\s*0(?:\\.0+)?\\s*(?:;|$)|(?:height|width)\\s*:\\s*0(?:px)?\\b" +
+  "|clip-path\\s*:\\s*inset\\s*\\(\\s*50%|(?:left|top|text-indent)\\s*:\\s*-\\d{3,}px)";
+
+const HIDDEN_STYLE_RE = new RegExp(
+  `<([a-z][\\w:-]*)\\b[^>]*\\bstyle\\s*=\\s*["'][^"']*${HIDDEN_STYLE}[^"']*["'][^>]*>[\\s\\S]*?<\\/\\1>`,
+  "gi",
+);
+
+/**
+ * Classes that mean "for screen readers only" everywhere they are used. A bare `hidden`
+ * class is deliberately absent: with Tailwind that is a responsive variant, and dropping
+ * `class="hidden md:block"` would delete real content.
+ */
+const HIDDEN_CLASS_RE =
+  /<([a-z][\w:-]*)\b[^>]*\bclass\s*=\s*["'][^"']*\b(?:sr-only|visually-?hidden|screen-reader-(?:only|text)|visually_hidden)\b[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi;
+
 function stripChrome(html: string): string {
   let out = html
     .replace(/<!--[\s\S]*?-->/g, " ")
@@ -88,10 +107,8 @@ function stripChrome(html: string): string {
     .replace(/\sdata-[\w:.-]+=(?:"[^"]*"|'[^']*')/gi, "")
     .replace(/<(script|style|noscript|template|svg|canvas|iframe|form)\b[\s\S]*?<\/\1>/gi, " ")
     // Text a human never sees but an extractor happily reads is an injection carrier.
-    .replace(
-      /<([a-z][\w:-]*)\b[^>]*\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|text-indent\s*:\s*-\d{3,}px)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi,
-      " ",
-    )
+    .replace(HIDDEN_STYLE_RE, " ")
+    .replace(HIDDEN_CLASS_RE, " ")
     .replace(
       /<([a-z][\w:-]*)\b[^>]*\s(?:hidden(?=[\s/>])|aria-hidden\s*=\s*["']true["'])[^>]*>[\s\S]*?<\/\1>/gi,
       " ",
@@ -214,22 +231,24 @@ export function truncate(text: string, maxChars: number): string {
  * paragraph. Long blocks are exempt so an article *about* prompt injection survives.
  */
 const INJECTION_PATTERNS: RegExp[] = [
-  /\b(?:ignore|disregard|forget|override|bypass)\b[^.\n]{0,40}\b(?:previous|prior|above|earlier|preceding|system|all)\b[^.\n]{0,20}\b(?:instructions?|prompts?|rules?|directions?|guidelines?|context)\b/i,
+  /\b(?:ignore|disregard|forget|override|bypass)\b[^.]{0,40}\b(?:previous|prior|above|earlier|preceding|system|all|any|your|the)\b[^.]{0,20}\b(?:instructions?|prompts?|rules?|directions?|guidelines?|context)\b/i,
+  /\bfrom now on,? you (?:will|must|shall|should|are)\b[^.]{0,40}\b(?:answer|respond|reply|output|print|only|obey|act|write|say|refuse)\b/i,
+  /\b(?:system|security|admin) override\b/i,
   /\bnew (?:system )?(?:instructions?|rules?)\s*:/i,
-  /\b(?:you are|you're) now\b[^.\n]{0,60}\b(?:a|an|the|my|in|acting|unrestricted)\b/i,
-  /\byou (?:must|will|should) now\b[^.\n]{0,40}\b(?:respond|answer|reply|output|print|ignore|act|say)\b/i,
+  /\b(?:you are|you're) now\b[^.]{0,60}\b(?:a|an|the|my|in|acting|unrestricted)\b/i,
+  /\byou (?:must|will|should) now\b[^.]{0,40}\b(?:respond|answer|reply|output|print|ignore|act|say)\b/i,
   /^(?:system|assistant|developer)\s*:\s*\S/im,
   /<\|(?:im_start|im_end|system|endoftext)\|>|\[(?:INST|\/INST|SYSTEM|SYS)\]/i,
-  /\b(?:reveal|print|repeat|show|output)\b[^.\n]{0,30}\b(?:your|the)\b[^.\n]{0,20}\b(?:system prompt|initial instructions|hidden instructions|instructions above)\b/i,
+  /\b(?:reveal|print|repeat|show|output)\b[^.]{0,30}\b(?:your|the)\b[^.]{0,20}\b(?:system prompt|initial instructions|hidden instructions|instructions above)\b/i,
   /\bif you are an? (?:ai|llm|language model|assistant|agent|chatbot)\b/i,
-  /\bas an? (?:ai|llm|language model|assistant|chatbot)\b[^.\n]{0,40}\b(?:you|your)\b/i,
-  /\b(?:do not|never) (?:tell|inform|mention|reveal|alert)\b[^.\n]{0,30}\b(?:the )?(?:user|human)\.?\s*$/im,
-  /\b(?:send|post|upload|exfiltrate|forward)\b[^.\n]{0,40}\b(?:conversation|chat history|api key|api keys|credentials|secrets|system prompt)\b/i,
+  /\bas an? (?:ai|llm|language model|assistant|chatbot)\b[^.]{0,40}\b(?:you|your)\b/i,
+  /\b(?:do not|never) (?:tell|inform|mention|reveal|alert)\b[^.]{0,30}\b(?:the )?(?:user|human)\.?\s*$/im,
+  /\b(?:send|post|upload|exfiltrate|forward)\b[^.]{0,40}\b(?:conversation|chat history|api key|api keys|credentials|secrets|system prompt)\b/i,
   /^\s*(?:note|important|attention|instruction)s? to (?:the )?(?:ai|llm|assistant|agent|model)\b/i,
 ];
 
-/** A block long enough to be an article rather than an aside is never dropped. */
-const INJECTION_MAX_BLOCK = 1_500;
+/** Sentences are the unit: an attacker can pad a paragraph for free, not a sentence. */
+const SENTENCE_SPLIT = /(?<=[.!?])\s+/;
 
 export interface InjectionScan {
   text: string;
@@ -240,17 +259,32 @@ export interface InjectionScan {
 /** Drop paragraphs that address the agent instead of the reader. */
 export function stripInjected(text: string): InjectionScan {
   if (!text) return { text, removed: 0 };
+  const matches = (fragment: string) => INJECTION_PATTERNS.some((pattern) => pattern.test(fragment));
   let removed = 0;
-  const kept = text.split(/\n\s*\n/).filter((block) => {
-    if (block.length > INJECTION_MAX_BLOCK) return true;
-    // A bare heading is a table-of-contents entry, not an instruction; "### System prompt"
-    // is what a security article looks like, not what an attack looks like.
-    if (/^#{1,6}\s/.test(block.trim()) && !block.includes("\n")) return true;
-    if (!INJECTION_PATTERNS.some((pattern) => pattern.test(block))) return true;
-    removed++;
-    return false;
+
+  const kept = text.split(/\n\s*\n/).map((block) => {
+    if (!matches(block)) return block;
+    // Drop the offending sentences, not the paragraph: padding a paragraph to look like an
+    // article costs an attacker nothing, so length cannot be what earns an exemption.
+    const before = removed;
+    const lines = block.split("\n").map((line) => {
+      if (!matches(line)) return line;
+      const sentences = line.split(SENTENCE_SPLIT).filter((sentence) => {
+        if (!matches(sentence)) return true;
+        removed++;
+        return false;
+      });
+      return sentences.join(" ").trim();
+    });
+    // The pattern only matched across a line break; then the whole block goes.
+    if (removed === before) {
+      removed++;
+      return "";
+    }
+    return lines.join("\n");
   });
-  return { text: kept.join("\n\n"), removed };
+
+  return { text: kept.filter((block) => block.trim()).join("\n\n"), removed };
 }
 
 export function isoDate(value: string | null | undefined): string | null {

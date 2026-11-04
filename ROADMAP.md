@@ -41,11 +41,18 @@ document why it cannot.
 `http://10.0.0.1/` returns an error without a request leaving the process, and a unit test
 covers it without touching the network.
 
-Done: `guard.ts` classifies every address (IPv4, IPv6, v4-mapped, NAT64, 6to4) and refuses
-single-label and `.internal`-style names; `curl -L` became a hand-rolled redirect loop so
-each hop is checked, and curl is pinned with `--resolve` to the address that was checked.
-`guard.test.ts` (offline) plus two tool tests in `tools.test.ts`: one proves a local HTTP
-server receives zero connections, one proves a redirect into `127.0.0.1` is not followed.
+Done: `guard.ts` classifies every address (IPv4, IPv6, v4-mapped, v4-translated,
+v4-compatible, NAT64 incl. RFC 8215, 6to4) and refuses single-label and `.internal`-style
+names; `curl -L` became a hand-rolled redirect loop so each hop is checked, and curl is
+pinned with `--resolve` to the address that was checked. `guard.test.ts` (offline) plus two
+tool tests in `tools.test.ts`: one proves a local HTTP server receives zero connections, one
+proves a redirect into `127.0.0.1` is not followed.
+
+Cross-review (CodeBuddy, second opinion) found three things the URL battery could not see,
+all fixed: a `~/.curlrc` could add `-L`/`-x` and silently undo the hop guard (curl now runs
+with `-q` first); a proxy makes `--resolve` inert (documented, reported by `/deepseek
+doctor`, guarded URL checks unaffected); DNS answers of `0.0.0.0`/`::` used by blocklists no
+longer reject a host that also has a usable address.
 
 ### [x] P0-2 Mark page text untrusted, strip obvious injections
 
@@ -57,11 +64,15 @@ call.
 **Done when** a fixture page with a classic injection paragraph comes back without that
 paragraph, with a note saying one was removed, and the marker survives paging.
 
-Done: `stripInjected` (13 patterns, blocks >1 500 chars exempt so articles about injection
-survive) plus hidden-element removal in `htmlToMarkdown`; text is filtered once, before
-caching, and `web_read` wraps every chunk in the untrusted markers. Checked against six
-ordinary pages (0 removals) and the Wikipedia/OWASP injection articles (2 and 5, which the
-note reports).
+Done: `stripInjected` (16 patterns, sentence-level so padding cannot disarm it) plus
+hidden-element removal in `htmlToMarkdown`; text is filtered once, before caching, and
+`web_read` wraps every chunk in untrusted markers. Checked against six ordinary pages
+(0 removals) and the Wikipedia/OWASP injection articles (2 and 5, which the note reports).
+
+Cross-review found the framing itself was forgeable — a page could print the END marker and
+continue outside the block, and the page title sat above it — so the markers now carry a
+per-call nonce, marker-like lines are defanged, and the title moved inside the block.
+`opacity:0`, `height:0`, off-screen positioning and `sr-only`-style classes are dropped too.
 
 ### [x] P0-3 `/deepseek doctor`
 

@@ -115,6 +115,46 @@ test("resolveFetchTarget refuses a host whose DNS answer lands inside the networ
   await assert.rejects(resolveFetchTarget("https://example.test/", { lookup: failing }), BlockedUrlError);
 });
 
+test("IPv4-tunnelling IPv6 forms are judged by the IPv4 address inside", () => {
+  for (const address of [
+    "::127.0.0.1", // deprecated IPv4-compatible
+    "::ffff:0:127.0.0.1", // IPv4-translated
+    "64:ff9b:1::7f00:1", // RFC 8215 local-use NAT64
+  ]) {
+    assert.equal(isPublicAddress(address), false, address);
+  }
+  assert.equal(isPublicAddress("::8.8.8.8"), true);
+  assert.equal(isPublicAddress("64:ff9b:1::808:808"), true);
+});
+
+test("placeholder DNS answers are ignored when a real address exists", async () => {
+  const withPlaceholder: Lookup = async () => [
+    { address: "0.0.0.0", family: 4 },
+    { address: "::", family: 6 },
+    { address: "185.199.108.133", family: 4 },
+  ];
+  const target = await resolveFetchTarget("https://raw.example.test/", { lookup: withPlaceholder });
+  assert.equal(target.address, "185.199.108.133");
+
+  const onlyPlaceholders: Lookup = async () => [
+    { address: "0.0.0.0", family: 4 },
+    { address: "::", family: 6 },
+  ];
+  await assert.rejects(
+    resolveFetchTarget("https://blocked.example.test/", { lookup: onlyPlaceholders }),
+    BlockedUrlError,
+  );
+
+  const placeholderPlusPrivate: Lookup = async () => [
+    { address: "::", family: 6 },
+    { address: "127.0.0.1", family: 4 },
+  ];
+  await assert.rejects(
+    resolveFetchTarget("https://rebind.example.test/", { lookup: placeholderPlusPrivate }),
+    BlockedUrlError,
+  );
+});
+
 test("resolveFetchTarget approves a public host and pins the checked address", async () => {
   const target = await resolveFetchTarget("HTTPS://Example.TEST/docs?q=1#frag", { lookup: publicLookup });
   assert.equal(target.hostname, "example.test");
