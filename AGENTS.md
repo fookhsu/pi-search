@@ -1,6 +1,6 @@
 # Working on this repo
 
-`pi-deepseek-search` — two Pi tools (`web_search`, `web_read`) for reading the live web.
+`pi-search` — two Pi tools (`web_search`, `web_read`) for reading the live web.
 Zero runtime dependencies; the extension is loaded by Pi from `index.ts`.
 
 ## Start here

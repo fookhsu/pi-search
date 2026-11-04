@@ -1,5 +1,5 @@
 /**
- * pi-deepseek-search v2
+ * pi-search v2
  *
  * Two tools, one idea: searching is cheap and fetching is unreliable, so the tools
  * spend context deliberately and tell the truth when a page cannot be read.

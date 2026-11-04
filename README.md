@@ -1,10 +1,10 @@
-# pi-deepseek-search
+# pi-search
 
 Web search and page reading for [Pi](https://pi.dev), built around one observation from
 measuring the underlying APIs: **searching is cheap and reliable, fetching is not**.
 
 ```bash
-pi install /path/to/this/checkout   # or: pi install npm:pi-deepseek-search
+pi install /path/to/this/checkout   # or: pi install npm:@fookhsu/pi-search
 ```
 
 ## Tools
