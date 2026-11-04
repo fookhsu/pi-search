@@ -1,6 +1,6 @@
 {
   "name": "@fookhsu/pi-search",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Web search and page reading for Pi: DeepSeek Search API plus a curl-first fetcher with budgeted context, session cache and honest errors.",
   "keywords": [
     "pi-package",
@@ -9,6 +9,7 @@
     "deepseek",
     "fetch"
   ],
+  "author": "fookhsu",
   "license": "MIT",
   "repository": {
     "type": "git",
