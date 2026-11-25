@@ -11,7 +11,8 @@ pi install /path/to/this/checkout   # or: pi install npm:@fookhsu/pi-search
 
 ### `web_search`
 
-DeepSeek's standalone Search API, with the parts an agent actually needs:
+DeepSeek's standalone Search API (default), with Zhipu's GLM Web Search API as an
+alternative backend, with the parts an agent actually needs:
 
 | | |
 |---|---|
@@ -22,9 +23,17 @@ DeepSeek's standalone Search API, with the parts an agent actually needs:
 | `include_content` | also inline page bodies (adds 4-12 KB per result) |
 | `max_chars` | total output budget, default 24 000 — the longest entries are trimmed and the result says so |
 | `refresh` | bypass the 10-minute session cache |
+| `provider` | `auto` (default), `deepseek`, or `glm` — auto falls back to GLM only when DeepSeek has no key or fails |
+| `glm_engine` | `search_std` (0.01 元/次), `search_pro` (0.03), `search_pro_sogou` (0.05, Tencent/Zhihu coverage), `search_pro_quark` (0.05) |
 
-Output shows `trust 3/4`, publication date and site per result, dedupes repeated pages, and
-strips the `#1`/`#2` fragments the index appends to URLs.
+The footer names the engine when GLM answered (`· glm · $0.00139`), and a fallback adds a
+note (`DeepSeek search failed (…); tried GLM instead. · via GLM`). GLM differences are
+respected, not papered over: queries cap at 70 chars, there is no `site:` syntax (use
+`allowed_domains`, which becomes its whitelist filter; `blocked_domains` is refused), no
+`lang:`/`after:` operators, and no authority score — so `min_authority` filters everything
+and the result says so. GLM results carry the excerpt as the summary; `include_content`
+maps to `content_size: "high"`. The key comes from a Pi Z.AI login, `GLM_API_KEY`, or
+`ZAI_API_KEY`.
 
 ### `web_read`
 
@@ -80,13 +89,16 @@ pair failed only where both fail (login walls, Reddit, Zhihu, m.medium.com).
 
 ## Pricing
 
-$0.75 per 1,000 successful requests; failed and empty requests are free. `web_read` only
-pays when curl cannot do the job. Every tool result footer shows `free`, `cached` or the
-estimated cost.
+DeepSeek: $0.75 per 1,000 successful requests; failed and empty requests are free.
+GLM: every successful call is priced per engine — `search_std` 0.01 元/次, `search_pro`
+0.03, `search_pro_sogou` / `search_pro_quark` 0.05 — converted at a fixed ≈7.2 CNY/USD for
+the footer, so a `search_std` call shows `· glm · $0.00139`. `web_read` only pays when curl
+cannot do the job. Every tool result footer shows `free`, `cached` or the estimated cost.
 
 ## Notes
 
-- The API key comes from Pi's DeepSeek login, then `DEEPSEEK_API_KEY`. Nothing else is read.
+- The DeepSeek key comes from Pi's DeepSeek login, then `DEEPSEEK_API_KEY`. The GLM key
+  comes from a Pi Z.AI login, then `GLM_API_KEY`, then `ZAI_API_KEY`. Nothing else is read.
 - Requests are self-limited to 4.5 QPS, under the account's 5 QPS cap.
 - Errors carry the fix, not just the status: a fetch that returns DeepSeek's `404` tells you
   which `curl` command to run instead.

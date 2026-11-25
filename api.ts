@@ -151,7 +151,7 @@ function validateText(value: string, label: string, max = 128): void {
   }
 }
 
-function validateDomains(domains: string[] | undefined, label: string): string[] {
+export function validateDomains(domains: string[] | undefined, label: string): string[] {
   if (!domains) return [];
   if (!Array.isArray(domains)) throw new DeepSeekError(`${label} must be a list of domain names.`, { kind: "invalid" });
   for (const domain of domains) {

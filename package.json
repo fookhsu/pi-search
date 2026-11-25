@@ -21,7 +21,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node --test --experimental-strip-types api.test.ts extract.test.ts guard.test.ts",
+    "test": "node --test --experimental-strip-types api.test.ts extract.test.ts guard.test.ts glm.test.ts",
     "test:live": "node --test --experimental-strip-types tools.test.ts"
   },
   "files": [

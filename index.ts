@@ -22,6 +22,7 @@ import {
   search,
   type SearchResult,
 } from "./api.ts";
+import { type GlmEngine, glmErrorHint, glmSearch } from "./glm.ts";
 import { TtlCache, cacheKey } from "./cache.ts";
 import { BlockedUrlError, type FetchTarget, resolveArgument, resolveFetchTarget } from "./guard.ts";
 import {
@@ -72,6 +73,8 @@ interface CachedSearch {
   results: SearchResult[];
   costUsd: number;
   query: string;
+  /** Which backend actually answered; footer and error hints branch on it. */
+  provider: "deepseek" | "glm";
 }
 
 interface CachedFetch {
@@ -104,6 +107,33 @@ async function resolveKey(ctx: ExtensionContext, required: boolean): Promise<Key
   if (!required) return null;
   throw new DeepSeekError(
     "No DeepSeek API key. Run /login in Pi and select DeepSeek, or export DEEPSEEK_API_KEY.",
+    { kind: "auth" },
+  );
+}
+
+let glmKeySource = "unresolved";
+
+/**
+ * GLM's key comes from whichever door is open: a Pi Z.AI login, GLM_API_KEY, or the
+ * ZAI_API_KEY env var Pi's own zai provider reads. The web-search endpoint is the BigModel
+ * open platform, so a coding-plan key may still be refused there — that shows up as auth.
+ */
+async function resolveGlmKey(ctx: ExtensionContext, required: boolean): Promise<KeyInfo | null> {
+  for (const provider of ["zai", "zai-coding-cn"]) {
+    const fromPi = await ctx.modelRegistry.getApiKeyForProvider(provider).catch(() => undefined);
+    if (fromPi) {
+      glmKeySource = `pi login (${provider})`;
+      return { key: fromPi, source: glmKeySource };
+    }
+  }
+  const fromEnv = process.env.GLM_API_KEY?.trim() || process.env.ZAI_API_KEY?.trim();
+  if (fromEnv) {
+    glmKeySource = process.env.GLM_API_KEY?.trim() ? "GLM_API_KEY" : "ZAI_API_KEY";
+    return { key: fromEnv, source: glmKeySource };
+  }
+  if (!required) return null;
+  throw new DeepSeekError(
+    "No GLM API key. Export GLM_API_KEY (open.bigmodel.cn), set ZAI_API_KEY, or run /login in Pi and pick Z.AI.",
     { kind: "auth" },
   );
 }
@@ -542,6 +572,20 @@ const searchParams = Type.Object({
     }),
   ),
   refresh: Type.Optional(Type.Boolean({ description: "Bypass the 10-minute session cache and search again." })),
+  provider: Type.Optional(
+    Type.String({
+      enum: ["auto", "deepseek", "glm"],
+      description:
+        "Search backend. auto (default) uses DeepSeek and falls back to GLM only when DeepSeek has no key or fails; deepseek and glm force one backend.",
+    }),
+  ),
+  glm_engine: Type.Optional(
+    Type.String({
+      enum: ["search_std", "search_pro", "search_pro_sogou", "search_pro_quark"],
+      description:
+        "GLM engine when provider is glm or auto fell back to it (default search_std, 0.01 CNY/call; sogou covers Tencent/Zhihu, quark is CJK-strong).",
+    }),
+  ),
 });
 
 const readParams = Type.Object({
@@ -569,6 +613,7 @@ type ReadParams = Static<typeof readParams>;
 
 interface SearchDetails {
   status: "running" | "ok" | "error";
+  provider?: "deepseek" | "glm";
   query?: string;
   found?: number;
   kept?: number;
@@ -598,9 +643,14 @@ interface ReadDetails {
   hint?: string;
 }
 
-function footer(theme: Theme, details: { costUsd?: number; cached?: boolean } | undefined): string {
+function footer(
+  theme: Theme,
+  details: { costUsd?: number; cached?: boolean; provider?: "deepseek" | "glm" } | undefined,
+): string {
   if (!details) return "";
   const bits: string[] = [];
+  // Provenance: name the engine when it is not the default DeepSeek path.
+  if (details.provider === "glm") bits.push("glm");
   if (details.cached) bits.push("cached");
   if (details.costUsd !== undefined) {
     bits.push(details.costUsd === 0 ? "free" : `$${details.costUsd.toFixed(5)}`);
@@ -799,7 +849,7 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
     name: "web_search",
     label: "Web Search",
     description:
-      "Search the live web with DeepSeek's Search API. Returns deduped ranked pages with titles, URLs, publication dates, an authority score and 1-4 KB summaries. Supports site:, exact phrases, lang:, after:/before:.",
+      "Search the live web with DeepSeek's Search API (default) or Zhipu's GLM Web Search API (provider: \"glm\"; auto falls back to GLM when DeepSeek has no key or fails). Returns deduped ranked pages with titles, URLs, publication dates and 1-4 KB summaries. DeepSeek supports site:, exact phrases, lang:, after:/before:; GLM supports a domain whitelist only and has no authority score.",
     promptSnippet: "web_search: search the live web; results carry multi-KB summaries, often enough to answer directly.",
     promptGuidelines: [
       "Use web_search for anything about the live web; each result already carries a 1-4 KB summary, so quote it rather than fetching every page.",
@@ -810,6 +860,8 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
     renderCall(args, theme) {
       const p = args as SearchParams;
       const tags: string[] = [];
+      if (p.provider && p.provider !== "auto") tags.push(p.provider);
+      if (p.glm_engine) tags.push(p.glm_engine);
       if (p.count !== undefined) tags.push(`×${p.count}`);
       if (p.allowed_domains?.length) tags.push(`+${p.allowed_domains.length}d`);
       if (p.blocked_domains?.length) tags.push(`-${p.blocked_domains.length}d`);
@@ -854,6 +906,8 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
     },
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const input = params as SearchParams;
+      const fallbackNotes: string[] = [];
+      let glmUsed = false;
       try {
         onUpdate?.({ content: [{ type: "text", text: "Searching…" }], details: { status: "running" } satisfies SearchDetails });
 
@@ -863,18 +917,50 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
           allowed: input.allowed_domains ?? [],
           blocked: input.blocked_domains ?? [],
           content: Boolean(input.include_content),
+          provider: input.provider ?? "auto",
+          glmEngine: input.glm_engine ?? "search_std",
         });
         let cached = input.refresh ? undefined : searchCache.get(cacheId);
         const cacheHit = Boolean(cached);
         if (cached) stats.cacheHits++;
 
         if (!cached) {
-          const key = await resolveKey(ctx, true);
-          const outcome = await search(key!.key, input, { signal });
-          stats.requests++;
-          stats.costUsd += outcome.costUsd;
-          cached = { results: outcome.results, costUsd: outcome.costUsd, query: input.query };
-          if (outcome.results.length) searchCache.set(cacheId, cached);
+          let glmFallback = false;
+          let fallbackNote = "";
+          if (input.provider !== "glm" && (await resolveKey(ctx, false))) {
+            try {
+              const key = await resolveKey(ctx, true);
+              const outcome = await search(key!.key, input, { signal });
+              stats.requests++;
+              stats.costUsd += outcome.costUsd;
+              cached = { results: outcome.results, costUsd: outcome.costUsd, query: input.query, provider: "deepseek" };
+            } catch (error) {
+              // auto falls through to GLM here; provider=deepseek rethrows below.
+              if (input.provider === "deepseek") throw error;
+              if (!(error instanceof DeepSeekError) || error.kind === "invalid") throw error;
+              glmFallback = true;
+              fallbackNote = `DeepSeek search failed (${error.message}); tried GLM instead.`;
+            }
+          } else if (input.provider !== "glm") {
+            // provider=deepseek means no fallback, ever: make the missing key an error.
+            if (input.provider === "deepseek") await resolveKey(ctx, true);
+            glmFallback = true;
+            fallbackNote = "DeepSeek has no API key; tried GLM instead.";
+          }
+          if (input.provider === "glm" || glmFallback) {
+            glmUsed = true;
+            const key = await resolveGlmKey(ctx, true);
+            const outcome = await glmSearch(
+              key!.key,
+              { ...input, engine: input.glm_engine as GlmEngine | undefined },
+              { signal },
+            );
+            stats.requests++;
+            stats.costUsd += outcome.costUsd;
+            cached = { results: outcome.results, costUsd: outcome.costUsd, query: input.query, provider: "glm" };
+            if (fallbackNote) fallbackNotes.push(fallbackNote);
+          }
+          if (cached.results.length) searchCache.set(cacheId, cached);
         }
 
         const deduped = dedupeByUrl(cached.results.map((item) => ({ ...item, url: cleanResultUrl(item.url) })));
@@ -884,12 +970,13 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
 
         if (!filtered.length) {
           const message = deduped.length
-            ? `No results for: ${input.query} (all ${deduped.length} hits scored below min_authority=${input.min_authority})`
+            ? `No results for: ${input.query} (all ${deduped.length} hits scored below min_authority=${input.min_authority}${cached.provider === "glm" ? "; GLM results carry no authority score, so min_authority filters everything" : ""})`
             : `No results for: ${input.query}`;
           return {
             content: [{ type: "text", text: message }],
             details: {
               status: "ok",
+              provider: cached.provider,
               query: input.query,
               found: 0,
               kept: 0,
@@ -904,11 +991,14 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
           includeContent: Boolean(input.include_content),
           budget,
         });
+        if (fallbackNotes.length) fallbackNotes.push(`via GLM (${cached.provider})`);
 
+        const text = fallbackNotes.length ? `${formatted.text}\n\n_(${fallbackNotes.join(" · ")})_` : formatted.text;
         return {
-          content: [{ type: "text", text: formatted.text }],
+          content: [{ type: "text", text }],
           details: {
             status: "ok",
+            provider: cached.provider,
             query: input.query,
             found: deduped.length,
             kept: formatted.kept,
@@ -927,7 +1017,7 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
         };
       } catch (error) {
         const dsError = error instanceof DeepSeekError ? error : new DeepSeekError(String(error), { kind: "api" });
-        const hint = errorHint(dsError, { path: "search" });
+        const hint = glmUsed ? glmErrorHint(dsError) : errorHint(dsError, { path: "search" });
         return {
           content: [{ type: "text", text: `Search failed: ${dsError.message}\n${hint}` }],
           details: { status: "error", error: dsError.message, hint } satisfies SearchDetails,
@@ -1101,6 +1191,7 @@ export default function deepseekSearchExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(
         [
           `key: ${keySource}`,
+          `glm key: ${glmKeySource}`,
           `calls: ${stats.requests} · spend: $${stats.costUsd.toFixed(5)}`,
           `cache: search ${searchCache.size}/${searchCache.hits}h · read ${fetchCache.size}/${fetchCache.hits}h`,
           `curl-only pages: ${stats.curlOnly} · escalated to DeepSeek: ${stats.escalated}`,

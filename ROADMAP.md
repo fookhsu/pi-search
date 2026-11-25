@@ -140,6 +140,25 @@ When the active provider ships a server-side search tool (ZAI `web_search_prime`
 "quota exhausted / not available for this provider" message otherwise. Blocked in practice
 until a quota resets; do not fake it.
 
+## Adopted off-roadmap
+
+### [x] A-1 GLM as a second search backend (adopted 2026-11-30, requested directly)
+
+`web_search` gains `provider: "auto" | "deepseek" | "glm"` and `glm_engine`. The GLM path
+speaks to `POST open.bigmodel.cn/api/paas/v4/web_search` (`glm.ts`), reuses the shared error
+type, rate limiter and result shape, and works with a Pi Z.AI login, `GLM_API_KEY` or
+`ZAI_API_KEY`. Differences are respected: 70-char query cap, whitelist-only domain filter
+(`blocked_domains` is refused), no operators, no authority score, per-call pricing by engine
+(0.01–0.05 元/次, footer shows the USD estimate).
+
+**Done when** `provider: "glm"` returns the shared output shape against the real API,
+`auto` falls back to GLM only when DeepSeek has no key or fails (and the body says so),
+`provider: "deepseek"` never silently switches, and the footer names the engine and cost.
+
+Done: live-verified `provider: "glm"`, the no-DeepSeek-key auto fallback, the failure
+fallback with its note, and the deepseek-no-key error. Unit tests in `glm.test.ts` cover
+request building, hit mapping, pricing, retry and failure classification.
+
 ## P3 — nice to have
 
 ### [ ] P3-1 Search hygiene by default
